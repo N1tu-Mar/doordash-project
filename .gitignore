@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.expo/
+*.tsbuildinfo
+
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# REAL RECEIPTS. Contains names, addresses, partial payment info.
+# Never version-controlled. See PROMPT.md §7.
+research/corpus/
+!research/corpus/.gitkeep
+
+.DS_Store
+coverage/
