@@ -94,52 +94,54 @@ export function diffOrder(
   detections: readonly DetectedItem[],
 ): DiffResult {
   const claimed = new Set<number>();
+  const matches: DetectedItem[][] = receiptItems.map(() => []);
+  const qualities: MatchQuality[] = receiptItems.map(() => "none");
 
-  const lines: DiffLine[] = receiptItems.map((receiptItem) => {
-    const matched: DetectedItem[] = [];
-    let quality: MatchQuality = "none";
-
-    // Exact normalized matches first, so a fuzzy near-miss can never steal a
-    // detection that some other line matches exactly.
+  // Pass 1: exact normalized matches across ALL lines. This runs to completion
+  // before any fuzzy matching, so a near-miss on one line can never consume a
+  // detection that another line matches exactly.
+  receiptItems.forEach((receiptItem, lineIndex) => {
     detections.forEach((d, i) => {
       if (claimed.has(i)) return;
       if (normalizeItemName(d.name) === normalizeItemName(receiptItem.name)) {
         claimed.add(i);
-        matched.push(d);
-        quality = "exact";
+        matches[lineIndex]?.push(d);
+        qualities[lineIndex] = "exact";
       }
     });
+  });
 
-    if (matched.length === 0) {
-      let bestIndex = -1;
-      let bestScore = 0;
-      detections.forEach((d, i) => {
-        if (claimed.has(i)) return;
-        const score = nameSimilarity(d.name, receiptItem.name);
-        if (score >= FUZZY_MATCH_THRESHOLD && score > bestScore) {
-          bestScore = score;
-          bestIndex = i;
-        }
-      });
-      if (bestIndex >= 0) {
-        const d = detections[bestIndex];
-        if (d) {
-          claimed.add(bestIndex);
-          matched.push(d);
-          quality = "fuzzy";
-        }
+  // Pass 2: best fuzzy candidate for lines still unmatched.
+  receiptItems.forEach((receiptItem, lineIndex) => {
+    if (qualities[lineIndex] !== "none") return;
+    let bestIndex = -1;
+    let bestScore = 0;
+    detections.forEach((d, i) => {
+      if (claimed.has(i)) return;
+      const score = nameSimilarity(d.name, receiptItem.name);
+      if (score >= FUZZY_MATCH_THRESHOLD && score > bestScore) {
+        bestScore = score;
+        bestIndex = i;
       }
+    });
+    const best = bestIndex >= 0 ? detections[bestIndex] : undefined;
+    if (best) {
+      claimed.add(bestIndex);
+      matches[lineIndex]?.push(best);
+      qualities[lineIndex] = "fuzzy";
     }
+  });
 
+  const lines: DiffLine[] = receiptItems.map((receiptItem, lineIndex) => {
+    const matched = matches[lineIndex] ?? [];
     const detectedQuantity = matched.reduce((sum, d) => sum + d.quantity, 0);
-
     return {
       receiptItem,
       orderedQuantity: receiptItem.quantity,
       detectedQuantity,
       proposedMissingQuantity: Math.max(0, receiptItem.quantity - detectedQuantity),
       matchedDetections: matched,
-      matchQuality: quality,
+      matchQuality: qualities[lineIndex] ?? "none",
       lowestConfidence:
         matched.length === 0 ? null : Math.min(...matched.map((d) => d.confidence)),
     };
