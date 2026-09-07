@@ -5,11 +5,13 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --exclude tests/money.corpus.test.ts --exclude '**/node_modules/**'",
     "test:watch": "vitest",
     "corpus:status": "tsx scripts/corpus-status.ts",
     "ingest:gmail": "tsx scripts/ingest-gmail.ts",
-    "db:push": "supabase db push"
+    "db:push": "supabase db push",
+    "test:corpus": "vitest run tests/money.corpus.test.ts",
+    "test:all": "vitest run"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.124.0",

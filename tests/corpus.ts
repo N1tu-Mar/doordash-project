@@ -18,6 +18,18 @@ export const VERIFIED_DIR = join(process.cwd(), "research", "corpus", "verified"
  * hand from the receipt itself. PROMPT.md §5: "Not generated cases. Real ones,
  * checked by hand."
  */
+export const VerifiedFeeLineSchema = z.object({
+  /** Printed label, verbatim. */
+  label: z.string().min(1),
+  cents: NonNegativeCentsSchema,
+  /**
+   * Hand-assigned kind. Recorded in the corpus file rather than derived by
+   * core/fees.ts, so a classifier change shows up as a test failure instead of
+   * silently rewriting the expected values.
+   */
+  kind: z.enum(["proportional", "per_delivery", "threshold", "passthrough", "unknown"]),
+});
+
 export const VerifiedReceiptSchema = z
   .object({
     receiptId: z.string().min(1),
@@ -25,12 +37,16 @@ export const VerifiedReceiptSchema = z
     /** Who hand-checked the expected values, and when. Audit trail for the eval set. */
     verifiedBy: z.string().min(1),
     verifiedAt: z.string().datetime({ offset: true }),
+    /** Which format class from receipt-formats.md this receipt covers. */
+    formatClass: z.string().min(1),
     totals: z.object({
       subtotalCents: NonNegativeCentsSchema,
-      feesCents: NonNegativeCentsSchema,
+      feeLines: z.array(VerifiedFeeLineSchema),
       taxCents: NonNegativeCentsSchema,
       tipCents: NonNegativeCentsSchema,
       totalCents: NonNegativeCentsSchema,
+      /** Present only when the receipt distinguishes taxable from non-taxable lines. */
+      taxableBaseCents: NonNegativeCentsSchema.optional(),
     }),
     items: z.array(OrderItemSchema).min(1),
     cases: z
@@ -41,10 +57,13 @@ export const VerifiedReceiptSchema = z
           missing: z
             .array(z.object({ itemIndex: z.number().int().min(0), quantity: z.number().int().min(1) }))
             .min(1),
+          /** Hand-computed from the receipt. Every field, so a partial check cannot pass. */
           expected: z.object({
-            missingSubtotalCents: NonNegativeCentsSchema,
-            owedExcludingTipCents: NonNegativeCentsSchema,
-            owedIncludingTipCents: NonNegativeCentsSchema,
+            missingGrossCents: NonNegativeCentsSchema,
+            missingNetCents: NonNegativeCentsSchema,
+            headlineCents: NonNegativeCentsSchema,
+            withTipCents: NonNegativeCentsSchema,
+            maximumCents: NonNegativeCentsSchema,
           }),
         }),
       )

@@ -5,7 +5,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { config } from "./config.js";
 import type { DetectedItem, IngestSource, OrderItem } from "../core/types.js";
-import { receiptBalanceDeltaCents, type ReceiptTotals } from "../core/money.js";
+import { receiptBalanceDeltaCents, totalFeesCents, type ReceiptMoney } from "../core/money.js";
 
 let client: SupabaseClient | null = null;
 
@@ -23,7 +23,7 @@ export interface InsertOrderInput {
   orderedAt: string;
   merchantName: string;
   merchantAddr: string | null;
-  totals: ReceiptTotals;
+  totals: ReceiptMoney;
   items: OrderItem[];
   /** Storage key of the raw artifact. Must already be uploaded — see §3.2. */
   rawArtifactPath: string;
@@ -47,7 +47,9 @@ export async function insertOrder(input: InsertOrderInput): Promise<string> {
       merchant_name: input.merchantName,
       merchant_addr: input.merchantAddr,
       subtotal_cents: input.totals.subtotalCents,
-      fees_cents: input.totals.feesCents,
+      fees_cents: totalFeesCents(input.totals.feeLines),
+      // Per-line, with the kind that drives the refund math. Migration 0004.
+      fee_lines: input.totals.feeLines,
       tax_cents: input.totals.taxCents,
       tip_cents: input.totals.tipCents,
       total_cents: input.totals.totalCents,
