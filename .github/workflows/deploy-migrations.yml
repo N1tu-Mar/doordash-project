@@ -1,0 +1,104 @@
+name: Deploy migrations
+
+# The only thing this project currently deploys.
+#
+# There is no server and no app bundle yet (docs/GAPS.md #9), so "CD" here means
+# one thing: getting supabase/migrations/ onto the real project in a controlled,
+# reviewed, logged way rather than someone running `supabase db push` from a
+# laptop at midnight.
+#
+# Deliberately manual. A schema change that lands automatically on a green test
+# run is a schema change nobody read, and this schema carries the constraints
+# that enforce PROMPT.md §2 and §3.5. `workflow_dispatch` plus a protected
+# environment means a human names the target and approves it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Which Supabase project to migrate
+        required: true
+        type: choice
+        options: [staging, production]
+      dry_run:
+        description: Print the diff without applying it
+        required: true
+        type: boolean
+        default: true
+
+concurrency:
+  # Two migration runs against one database is how a half-applied schema
+  # happens. Never cancel one in flight; queue behind it.
+  group: migrate-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: ${{ inputs.dry_run && 'diff' || 'apply' }} → ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    # Configure this environment in repo settings with required reviewers, and
+    # put SUPABASE_ACCESS_TOKEN / SUPABASE_PROJECT_REF / SUPABASE_DB_PASSWORD in
+    # it. Environment-scoped secrets are not readable by any other workflow,
+    # which matters because CI runs on pull requests from forks.
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link project
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
+
+      - name: Show what would change
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: supabase db diff --linked || true
+
+      - name: Apply migrations
+        if: ${{ !inputs.dry_run }}
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: supabase db push --linked
+
+      - name: Verify the deployed schema still encodes the rules
+        if: ${{ !inputs.dry_run }}
+        env:
+          # Session-pooler connection string for the linked project. Same
+          # assertions CI runs against a throwaway container, now against the
+          # database that actually holds real receipts.
+          PGURI: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y postgresql-client
+          psql "$PGURI" -v ON_ERROR_STOP=1 -f supabase/ci/01_assert_schema.sql
+
+      - name: Confirm storage buckets exist and are private
+        if: ${{ !inputs.dry_run }}
+        env:
+          PGURI: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          # Raw receipts and delivered-food photos are personal data. A public
+          # bucket here is a data breach with a URL, so this fails the deploy
+          # rather than warning about it.
+          psql "$PGURI" -v ON_ERROR_STOP=1 -c "
+            do \$\$
+            declare b text;
+            begin
+              for b in select v from unnest(array['raw-receipts','delivered-photos']) v loop
+                if not exists (select 1 from storage.buckets where id = b) then
+                  raise exception 'storage bucket % does not exist', b;
+                end if;
+                if exists (select 1 from storage.buckets where id = b and public) then
+                  raise exception 'storage bucket % is PUBLIC', b;
+                end if;
+              end loop;
+            end \$\$;"

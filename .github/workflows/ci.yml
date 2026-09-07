@@ -1,0 +1,172 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Nothing in CI reaches a real service. There are no secrets in this workflow
+  # and there must never be: a job that can read the Anthropic key or the
+  # service-role key is a job that can be made to exfiltrate them from a fork PR.
+  CI: "true"
+
+jobs:
+  checks:
+    name: typecheck + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit and property tests
+        run: pnpm test
+
+  schema:
+    name: migrations apply and hold their invariants
+    runs-on: ubuntu-latest
+    # This is the job that closes docs/GAPS.md #5 for everything except a real
+    # Supabase project: it proves the SQL parses, the trigger functions compile,
+    # the RLS policies bind and the views build. It writes no rows — see
+    # supabase/ci/00_auth_shim.sql for why that is deliberate.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: shorted_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: shorted_ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install psql client
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y postgresql-client
+
+      - name: Supabase auth shim (schema only, no rows)
+        run: psql -v ON_ERROR_STOP=1 -f supabase/ci/00_auth_shim.sql
+
+      - name: Apply migrations in order
+        run: |
+          set -euo pipefail
+          for file in $(ls supabase/migrations/*.sql | sort); do
+            echo "--- $file"
+            psql -v ON_ERROR_STOP=1 -f "$file"
+          done
+
+      - name: Assert the schema still encodes the rules
+        run: psql -v ON_ERROR_STOP=1 -f supabase/ci/01_assert_schema.sql
+
+      - name: Re-applying migrations must fail, not silently diverge
+        run: |
+          # A migration that is accidentally idempotent (CREATE TABLE IF NOT
+          # EXISTS everywhere) hides drift: the file changes, the database does
+          # not, and nobody finds out until production. Applying 0001 twice has
+          # to error.
+          if psql -v ON_ERROR_STOP=1 -f supabase/migrations/0001_init.sql 2>/dev/null; then
+            echo "0001 re-applied cleanly — migrations are not detecting existing state"
+            exit 1
+          fi
+          echo "re-apply correctly rejected"
+
+  corpus:
+    name: "money math vs real receipts (RED until the corpus exists)"
+    runs-on: ubuntu-latest
+    # Intentionally non-blocking. tests/money.corpus.test.ts fails on a fresh
+    # clone because core/money.ts is genuinely unverified against real receipts
+    # — PROMPT.md §5 requires hand-checked real ones and there are none yet.
+    # Hiding that would make the pipeline green and the claim false. Reporting
+    # it as a separate red job keeps it loud without blocking every other change.
+    #
+    # This job turns green by importing a real order and hand-checking its
+    # refund values into research/corpus/verified/. Not by editing the test.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Corpus status
+        run: pnpm corpus:status
+
+      - name: Money math against hand-verified real receipts
+        run: pnpm test:corpus
+
+  no-corpus-committed:
+    name: "no real receipts in version control"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: research/corpus must never be tracked
+        # Real receipts carry names, addresses and partial payment information.
+        # PROMPT.md §7: they never enter version control, ever. Checking the
+        # working tree is not enough — check every commit reachable from here.
+        run: |
+          set -euo pipefail
+          tracked=$(git ls-files 'research/corpus/*' | grep -v '\.gitkeep$' || true)
+          if [ -n "$tracked" ]; then
+            echo "corpus files are tracked:"
+            echo "$tracked"
+            exit 1
+          fi
+
+          historical=$(git log --all --diff-filter=A --name-only --format= \
+            -- 'research/corpus/*' | grep -v '\.gitkeep$' | sort -u || true)
+          if [ -n "$historical" ]; then
+            echo "corpus files were committed at some point in history:"
+            echo "$historical"
+            echo "history needs rewriting — PROMPT.md §7"
+            exit 1
+          fi
+          echo "no corpus files in the working tree or in history"
+
+      - name: no .env committed
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -E '(^|/)\.env($|\.)' | grep -v '\.env\.example'; then
+            echo "an environment file is tracked"
+            exit 1
+          fi
+          echo "no environment files tracked"
