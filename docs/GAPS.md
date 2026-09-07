@@ -144,7 +144,7 @@ happened. §3.5's n >= 20 gate is in place either way.
 - **Detections attributed to the first photo.** RESOLVED by R5 — one detection call
   per photo, merged in `core/dedupe.ts`, so attribution is a fact the caller records.
 
-- **Migration 0004 adds `substitution_unwanted` to `discrepancies.kind`.**
+- **Migration 0006 adds `substitution_unwanted` to `discrepancies.kind`.**
   `money-model.md` §5 recommended it and left it as the builder's call. Taken: forcing
   substitutions into `wrong_item` would poison the shortage index with merchant
   behaviour that is not a shortage.

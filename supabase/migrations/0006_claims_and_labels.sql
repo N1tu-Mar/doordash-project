@@ -5,29 +5,27 @@
 -- research/findings/vision-and-models.md §4,§5,§7 — model call logging, typed edits
 -- research/findings/RESPONSES.md R2      — rejected-message log, metadata only
 --
--- Numbered 0004 because migration 0003 belongs to the concurrent hardening pass
--- (insert_order_with_items). This file does not depend on it.
+-- Numbered 0006 because 0003-0005 belong to the concurrent hardening pass. This
+-- file depends on none of them: it touches only tables created in 0001 and 0002,
+-- and every column it adds is one those migrations do not.
+--
+-- Fee lines are deliberately NOT here. 0005 gives them their own table
+-- (order_fee_lines) with RLS and a kind column, which is the better home than a
+-- jsonb blob on orders — one row per printed line, ordered, individually
+-- queryable by kind, which is exactly how core/money.ts allocates them.
 
--- ----------------------------------------------------------- fee lines ----
+-- --------------------------------------------------------- taxable base ----
 
--- Correction B: fees are per-line with a kind, not one scalar. `fees_cents`
--- stays as the sum, because the receipt prints a sum and the reconciliation
--- check needs it; `fee_lines` is what core/money.ts actually allocates against.
-alter table orders
-  add column fee_lines jsonb not null default '[]'::jsonb;
-
-alter table orders
-  add constraint orders_fee_lines_is_array check (jsonb_typeof(fee_lines) = 'array');
-
-comment on column orders.fee_lines is
-  'Per-line fees: [{label, cents, kind}]. kind drives allocation in core/money.ts. '
-  'An unrecognised label classifies as ''unknown'' and is never pro-rated into a claim.';
-
--- The taxable base, when the receipt distinguishes taxable from non-taxable
--- lines. NULL means unknown, which is a different fact from "everything was
--- taxable" and must not be collapsed into it (Correction C).
+-- Correction C: tax is recomputed against a base, not scaled against the
+-- subtotal. NULL means the receipt did not disclose which lines were taxable,
+-- which is a different fact from "everything was taxable" and must not be
+-- collapsed into it — core/money.ts flags the difference as taxBasisIsAssumed.
 alter table orders
   add column taxable_base_cents int check (taxable_base_cents is null or taxable_base_cents >= 0);
+
+comment on column orders.taxable_base_cents is
+  'Base the printed tax was charged on, when the receipt discloses it. NULL means unknown. '
+  'Fee lines live in order_fee_lines (migration 0005), not on this table.';
 
 -- ------------------------------------------------------- discrepancies ----
 
@@ -36,7 +34,36 @@ alter table orders
 -- may not accept it. Recommended in money-model.md §5 and flagged there as the
 -- builder's call. Taking it: forcing substitutions into 'wrong_item' would
 -- poison the shortage index with merchant behaviour that is not a shortage.
-alter table discrepancies drop constraint discrepancies_kind_check;
+-- The constraint is dropped by lookup rather than by name. Postgres names an
+-- inline column CHECK `<table>_<column>_check`, but that is a convention, not a
+-- guarantee: an earlier migration that recreated the constraint, or a rename,
+-- leaves a different name and `drop constraint discrepancies_kind_check` then
+-- fails the whole deploy. Finding it by column is name-independent, and raising
+-- when there is no constraint at all is better than widening nothing silently.
+do $$
+declare
+  existing_name text;
+begin
+  select con.conname into existing_name
+  from pg_constraint con
+  join pg_class rel on rel.oid = con.conrelid
+  join pg_namespace nsp on nsp.oid = rel.relnamespace
+  where nsp.nspname = 'public'
+    and rel.relname = 'discrepancies'
+    and con.contype = 'c'
+    and pg_get_constraintdef(con.oid) ilike '%kind%'
+    and pg_get_constraintdef(con.oid) ilike '%modifier_ignored%'
+  limit 1;
+
+  if existing_name is null then
+    raise exception
+      'no CHECK constraint on discrepancies.kind was found — refusing to widen an enum that is not there';
+  end if;
+
+  execute format('alter table discrepancies drop constraint %I', existing_name);
+end
+$$;
+
 alter table discrepancies add constraint discrepancies_kind_check
   check (kind in ('missing', 'wrong_item', 'modifier_ignored', 'damaged', 'substitution_unwanted'));
 
