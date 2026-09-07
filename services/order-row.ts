@@ -13,6 +13,7 @@
  * as one number.
  */
 import { receiptBalanceDeltaCents, totalFeesCents, type ReceiptMoney } from "../core/money.js";
+import { assertPlausibleReceiptAmount, boundedUntrustedName } from "../core/untrusted.js";
 
 /** The money columns of an `orders` row. Spread into the insert; nothing else. */
 export function orderMoneyColumns(totals: ReceiptMoney): {
@@ -54,10 +55,25 @@ export function feeLineRows(
   orderId: string,
   totals: ReceiptMoney,
 ): Array<{ order_id: string; label: string; cents: number; kind: string; line_index: number }> {
+  return feeLineValues(totals).map((row) => ({ order_id: orderId, ...row }));
+}
+
+/**
+ * The same rows without an order id, for `insert_order_full` — which creates the
+ * order and its fee lines in one transaction and therefore has no id to give us
+ * beforehand.
+ *
+ * The label is defanged and the amount bounded HERE rather than at one call
+ * site. A fee label is text a model read off an untrusted receipt image, and it
+ * is later interpolated into the dispute text sent under the user's name; doing
+ * it at the mapping layer means a second writer cannot forget.
+ */
+export function feeLineValues(
+  totals: ReceiptMoney,
+): Array<{ label: string; cents: number; kind: string; line_index: number }> {
   return totals.feeLines.map((fee, lineIndex) => ({
-    order_id: orderId,
-    label: fee.label,
-    cents: fee.cents,
+    label: boundedUntrustedName(`feeLines[${lineIndex}].label`, fee.label),
+    cents: assertPlausibleReceiptAmount(`feeLines[${lineIndex}].cents`, fee.cents),
     kind: fee.kind,
     line_index: lineIndex,
   }));

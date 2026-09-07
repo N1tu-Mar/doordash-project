@@ -15,7 +15,8 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { MODELS, PROMPT_VERSIONS, config } from "./config.js";
-import { recordModelCall } from "./db.js";
+import { recordModelCall, type UserContext } from "./db.js";
+import { redactedMessage } from "./secrets.js";
 import { sha256 } from "./storage.js";
 import { extractAmountsCents, type ClaimDraft } from "../core/claim.js";
 import { ShortedDataError } from "../core/types.js";
@@ -64,14 +65,13 @@ export interface PolishResult {
  */
 export async function polishClaimText(
   draft: ClaimDraft,
-  ctx: { userId: string; orderId: string | null },
+  ctx: UserContext & { orderId: string | null },
 ): Promise<PolishResult> {
   const started = Date.now();
   const inputHash = sha256(draft.body);
 
   const reject = async (reason: string, error: string): Promise<PolishResult> => {
-    await recordModelCall({
-      userId: ctx.userId,
+    await recordModelCall(ctx, {
       orderId: ctx.orderId,
       kind: "claim_text",
       modelId: MODELS.claimText,
@@ -92,7 +92,9 @@ export async function polishClaimText(
       messages: [{ role: "user", content: draft.body }],
     });
   } catch (err) {
-    return reject("model_call_failed", err instanceof Error ? err.message : String(err));
+    // Redacted: an SDK error carries the outbound request, and the outbound
+    // request carries the API key. model_calls.error is a durable column.
+    return reject("model_call_failed", redactedMessage(err));
   }
 
   const text = response.content
@@ -114,8 +116,7 @@ export async function polishClaimText(
     );
   }
 
-  await recordModelCall({
-    userId: ctx.userId,
+  await recordModelCall(ctx, {
     orderId: ctx.orderId,
     kind: "claim_text",
     modelId: MODELS.claimText,

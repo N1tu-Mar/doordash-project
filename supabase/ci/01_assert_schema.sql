@@ -76,8 +76,9 @@ begin
   ---------------------------------------------------------------- RLS -----
   for missing in
     select t from unnest(array[
-      'orders', 'order_items', 'discrepancies', 'model_calls',
+      'orders', 'order_items', 'order_fee_lines', 'discrepancies', 'model_calls',
       'gmail_ingest_consents', 'gmail_messages',
+      'user_roles', 'admin_audit_log',
       'claims', 'confirmation_edits', 'gmail_rejected_messages'
     ]) t
     where not exists (
@@ -93,8 +94,9 @@ begin
   -- fails silently. Every protected table must actually carry a policy.
   for missing in
     select t from unnest(array[
-      'orders', 'order_items', 'discrepancies', 'model_calls',
+      'orders', 'order_items', 'order_fee_lines', 'discrepancies', 'model_calls',
       'gmail_ingest_consents', 'gmail_messages',
+      'user_roles', 'admin_audit_log',
       'claims', 'confirmation_edits', 'gmail_rejected_messages'
     ]) t
     where not exists (select 1 from pg_policies where schemaname = 'public' and tablename = t)
@@ -107,6 +109,12 @@ begin
     select t from unnest(array[
       'orders_immutable_columns',
       'discrepancies_immutable_detected',
+      -- 0003-0005: the record of what happened, and who was allowed to see it.
+      'model_calls_append_only',
+      'gmail_messages_immutable',
+      'user_roles_no_self_service',
+      'admin_audit_append_only',
+      'discrepancies_photo_paths_owned',
       'confirmation_edits_append_only',
       'claims_immutable_amounts'
     ]) t

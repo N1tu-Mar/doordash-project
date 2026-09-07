@@ -22,3 +22,55 @@ create or replace function auth.uid()
 returns uuid language sql stable as $$
   select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid;
 $$;
+
+-- ---------------------------------------------------------------- roles ----
+
+-- Supabase ships `anon`, `authenticated` and `service_role`, and the migrations
+-- grant and revoke against them by name. A bare Postgres container has none of
+-- them, so `revoke all on orders from anon` aborts the migration.
+--
+-- NOLOGIN, and no privileges beyond what the migrations themselves grant. The
+-- point is to make GRANT/REVOKE statements resolve so CI actually exercises
+-- them; getting the grant lists wrong is exactly the class of bug that reaches
+-- production as "why can anon read this".
+do $$
+begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then
+    create role anon nologin noinherit;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then
+    create role authenticated nologin noinherit;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then
+    create role service_role nologin noinherit bypassrls;
+  end if;
+end $$;
+
+-- --------------------------------------------------------------- storage ---
+
+-- Migration 0003 creates the artifact buckets and their object policies.
+-- Supabase's storage extension owns these; a bare container has neither, and
+-- the policy bodies call storage.foldername().
+create schema if not exists storage;
+
+create table if not exists storage.buckets (
+  id                 text primary key,
+  name               text not null,
+  public             boolean not null default false,
+  file_size_limit    bigint,
+  allowed_mime_types text[]
+);
+
+create table if not exists storage.objects (
+  id        uuid primary key default gen_random_uuid(),
+  bucket_id text references storage.buckets,
+  name      text not null,
+  owner     uuid
+);
+
+-- Supabase's real implementation splits an object key on '/'. Objects here are
+-- keyed `<userId>/<sha256>.<ext>`, so element 1 is the owning user.
+create or replace function storage.foldername(name text)
+returns text[] language sql immutable as $$
+  select string_to_array(name, '/');
+$$;

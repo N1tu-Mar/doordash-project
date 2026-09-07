@@ -303,3 +303,112 @@ having count(*) >= 20;
 comment on view claim_recovery_stats is
   'Observed recovery vs what we computed as owed. n >= 20 enforced in SQL. Never '
   'used to cap owed_cents — owed is what is owed (money-model.md §6).';
+
+-- ------------------------------ insert_order_full: carry the taxable base ---
+
+-- 0005 created insert_order_full() before `orders.taxable_base_cents` existed,
+-- so it cannot write the column added at the top of this file. A base that the
+-- receipt disclosed but the writer dropped is worse than one it never had:
+-- core/money.ts would then report taxBasisIsAssumed on an order whose basis was
+-- actually known, and quietly recompute tax against the wrong denominator.
+--
+-- Redefined rather than patched so the whole signature stays in one place.
+drop function if exists insert_order_full(
+  text, timestamptz, text, text, int, int, int, int, text, text, int, jsonb, jsonb
+);
+
+create or replace function insert_order_full(
+  p_source              text,
+  p_ordered_at          timestamptz,
+  p_merchant_name       text,
+  p_merchant_addr       text,
+  p_subtotal_cents      int,
+  p_tax_cents           int,
+  p_tip_cents           int,
+  p_total_cents         int,
+  p_taxable_base_cents  int,
+  p_raw_artifact_path   text,
+  p_parser_version      text,
+  p_balance_delta_cents int,
+  p_items               jsonb,
+  p_fee_lines           jsonb
+) returns uuid
+language plpgsql
+set search_path = pg_catalog, public as $$
+declare
+  v_user_id uuid := (select auth.uid());
+  v_order_id uuid;
+  v_fees_cents int;
+begin
+  if v_user_id is null then
+    raise exception 'insert_order_full requires an authenticated session';
+  end if;
+
+  if jsonb_typeof(p_items) <> 'array' or jsonb_array_length(p_items) = 0 then
+    raise exception 'an order must be inserted with at least one line item';
+  end if;
+  if jsonb_array_length(p_items) > 200 then
+    raise exception 'refusing % line items on one order', jsonb_array_length(p_items);
+  end if;
+  if jsonb_typeof(p_fee_lines) <> 'array' then
+    raise exception 'p_fee_lines must be a json array (empty is fine)';
+  end if;
+  if jsonb_array_length(p_fee_lines) > 40 then
+    raise exception 'refusing % fee lines on one order', jsonb_array_length(p_fee_lines);
+  end if;
+
+  -- fees_cents is derived here, not passed in, so the scalar and the lines
+  -- cannot disagree. There is no argument a caller could get wrong.
+  select coalesce(sum((fee->>'cents')::int), 0) into v_fees_cents
+  from jsonb_array_elements(p_fee_lines) as fee;
+
+  insert into orders (
+    user_id, source, ordered_at, merchant_name, merchant_addr,
+    subtotal_cents, fees_cents, tax_cents, tip_cents, total_cents,
+    taxable_base_cents, raw_artifact_path, parser_version, balance_delta_cents
+  ) values (
+    v_user_id, p_source, p_ordered_at, p_merchant_name, p_merchant_addr,
+    p_subtotal_cents, v_fees_cents, p_tax_cents, p_tip_cents, p_total_cents,
+    p_taxable_base_cents, p_raw_artifact_path, p_parser_version, p_balance_delta_cents
+  )
+  returning id into v_order_id;
+
+  insert into order_items (order_id, name, quantity, unit_price_cents, modifiers, line_index)
+  select
+    v_order_id,
+    item->>'name',
+    (item->>'quantity')::int,
+    (item->>'unit_price_cents')::int,
+    coalesce(item->'modifiers', '[]'::jsonb),
+    (item->>'line_index')::int
+  from jsonb_array_elements(p_items) as item;
+
+  insert into order_fee_lines (order_id, label, cents, kind, line_index)
+  select
+    v_order_id,
+    fee->>'label',
+    (fee->>'cents')::int,
+    fee->>'kind',
+    (fee->>'line_index')::int
+  from jsonb_array_elements(p_fee_lines) as fee;
+
+  -- All three inserts share this function's implicit transaction: the order,
+  -- every line item and every fee line exist together, or none of them do.
+  return v_order_id;
+end;
+$$;
+
+revoke all on function insert_order_full(
+  text, timestamptz, text, text, int, int, int, int, int, text, text, int, jsonb, jsonb
+) from public, anon;
+grant execute on function insert_order_full(
+  text, timestamptz, text, text, int, int, int, int, int, text, text, int, jsonb, jsonb
+) to authenticated;
+
+comment on function insert_order_full(
+  text, timestamptz, text, text, int, int, int, int, int, text, text, int, jsonb, jsonb
+) is
+  'Atomic order + line items + fee lines. SECURITY INVOKER, user_id from '
+  'auth.uid(), fees_cents derived from the fee lines. An order missing its '
+  'items or its fee kinds understates a refund without looking wrong, so the '
+  'writes commit together or not at all.';

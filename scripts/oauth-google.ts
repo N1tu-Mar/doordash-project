@@ -15,14 +15,21 @@
  *   4. Records the consent row VERBATIM, so `assertGmailConsent` has something
  *      real to check against rather than a row someone inserted by hand.
  *
- * The refresh token is printed, never written to a file. A token on disk in a
- * repo directory is a token that ends up in a commit.
+ * The refresh token is never printed and never written to a file. It is
+ * encrypted with TOKEN_ENCRYPTION_KEY and stored on the consent row, and
+ * `ingestGmailReceipts()` reads it back itself. A token echoed to a terminal
+ * lands in scrollback, in `script` logs and in screen shares; one on disk in a
+ * repo directory ends up in a commit.
+ *
+ * This runs as the service role because it happens BEFORE the user has a
+ * Supabase session — see ServiceReason "oauth_consent_recording".
  */
 import { createServer } from "node:http";
 import { createInterface } from "node:readline/promises";
-import { GMAIL_SCOPES, oauthClient } from "../ingest/gmail.js";
+import { GMAIL_SCOPES, oauthClient, storeRefreshToken } from "../ingest/gmail.js";
 import { config } from "../services/config.js";
-import { db } from "../services/db.js";
+import { adminDb, type ServiceContext } from "../services/db.js";
+import { redactedMessage } from "../services/secrets.js";
 
 /**
  * The exact wording the user is agreeing to. Stored verbatim in
@@ -106,13 +113,25 @@ if (!tokens.refresh_token) {
   );
 }
 
-const { error } = await db().from("gmail_ingest_consents").insert({
+const ctx: ServiceContext = {
+  kind: "service",
+  reason: "oauth_consent_recording",
+  userId,
+};
+
+const { error } = await adminDb(ctx.reason).from("gmail_ingest_consents").insert({
   user_id: userId,
   consent_text: CONSENT_TEXT,
   scopes: [...GMAIL_SCOPES],
 });
-if (error) throw new Error(`failed to record consent: ${error.message}`);
+if (error) throw new Error(`failed to record consent: ${redactedMessage(error.message)}`);
 
-console.log("\nConsent recorded. Refresh token (shown once, store it in your secret manager):\n");
-console.log(tokens.refresh_token);
-console.log("\nNext:  pnpm ingest:gmail " + userId + " <that token> 50\n");
+// Encrypted at rest, bound to this user id as AAD, and never returned to the
+// terminal. The consent row has to exist first — storeRefreshToken checks it.
+await storeRefreshToken(ctx, tokens.refresh_token);
+
+console.log("\nConsent recorded and refresh token stored, encrypted, on the consent row.");
+console.log("It was not printed: it is a long-lived key to this inbox.\n");
+console.log("Next:");
+console.log(`  SHORTED_USER_ID=${userId} SHORTED_ACCESS_TOKEN=<supabase jwt> \\`);
+console.log("    pnpm ingest:gmail 50\n");

@@ -62,19 +62,29 @@ export function minCostAssignment(cost: readonly (readonly number[])[]): number[
   const at = (r: number, c: number): number => cost[r]?.[c] ?? 0;
 
   // 1-indexed working arrays, as the standard formulation is written.
-  const u = new Array<number>(rows + 1).fill(0);
-  const v = new Array<number>(cols + 1).fill(0);
-  const columnRow = new Array<number>(cols + 1).fill(0); // columnRow[col] = row
-  const way = new Array<number>(cols + 1).fill(0);
+  //
+  // Typed arrays rather than `new Array<number>`: these hold nothing but numbers
+  // and never grow, which is exactly what a Float64Array/Int32Array is for — one
+  // flat allocation instead of a boxed JS array.
+  const u = new Float64Array(rows + 1);
+  const v = new Float64Array(cols + 1);
+  const columnRow = new Int32Array(cols + 1); // columnRow[col] = row
+  const way = new Int32Array(cols + 1);
+
+  // Allocated ONCE and refilled per row. The previous shape allocated both
+  // inside the row loop, so a 40-line receipt against 30 detections built 80
+  // throwaway arrays to compute one assignment.
+  const minv = new Float64Array(cols + 1);
+  const used = new Uint8Array(cols + 1);
 
   for (let i = 1; i <= rows; i += 1) {
     columnRow[0] = i;
     let j0 = 0;
-    const minv = new Array<number>(cols + 1).fill(INF);
-    const used = new Array<boolean>(cols + 1).fill(false);
+    minv.fill(INF);
+    used.fill(0);
 
     do {
-      used[j0] = true;
+      used[j0] = 1;
       const i0 = columnRow[j0] ?? 0;
       let delta = INF;
       let j1 = 0;
