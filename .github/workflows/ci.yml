@@ -38,14 +38,19 @@ jobs:
         run: pnpm typecheck
 
       - name: Unit and property tests
+        # Includes tests/schema.test.ts, which applies every migration to
+        # Postgres compiled to WebAssembly and runs the schema assertions
+        # against it. So the SQL is checked here too, in-process, before the
+        # dedicated container job below gets to it.
         run: pnpm test
 
   schema:
     name: migrations apply and hold their invariants
     runs-on: ubuntu-latest
-    # This is the job that closes docs/GAPS.md #5 for everything except a real
-    # Supabase project: it proves the SQL parses, the trigger functions compile,
-    # the RLS policies bind and the views build. It writes no rows — see
+    # The authoritative schema check. `checks` already applied these migrations
+    # in-process via PGlite, which is the actual Postgres engine but a different
+    # major built for wasm32; this runs them against a stock Postgres 16 server,
+    # which is what the deployed database will be. It writes no rows — see
     # supabase/ci/00_auth_shim.sql for why that is deliberate.
     services:
       postgres:
