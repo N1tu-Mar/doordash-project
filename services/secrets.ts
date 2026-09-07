@@ -128,7 +128,11 @@ const REDACTED = "[redacted]";
 export function redact(text: string): string {
   let out = text;
   for (const secret of registered) {
-    if (secret.length === 0) continue;
+    // `includes` first: split/join allocates an array and a fresh string on
+    // every call, and redact() runs on every error the system produces. Almost
+    // no error message contains a live secret, so the common path should not
+    // rebuild the string once per registered credential.
+    if (secret.length === 0 || !out.includes(secret)) continue;
     out = out.split(secret).join(REDACTED);
   }
   for (const pattern of CREDENTIAL_PATTERNS) {

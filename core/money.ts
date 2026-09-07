@@ -427,17 +427,31 @@ export function splitByLargestRemainder(
     );
   }
 
-  const exact = weights.map((w) => (totalCents * w) / weightSum);
-  const floors = exact.map((v) => Math.floor(v));
-  let remainder = totalCents - floors.reduce((sum, v) => sum + v, 0);
+  // Four arrays became two. The old shape built `exact`, `floors`, an array of
+  // {index, fraction} objects, and a copy of `floors` — one object allocation
+  // per weight, purely to carry a sort key. Fractions live in a Float64Array and
+  // the sort runs over an index array instead.
+  const out = new Array<number>(weights.length);
+  const fractions = new Float64Array(weights.length);
+  let distributed = 0;
 
-  const order = exact
-    .map((value, index) => ({ index, fraction: value - Math.floor(value) }))
+  for (let i = 0; i < weights.length; i += 1) {
+    const exact = (totalCents * (weights[i] ?? 0)) / weightSum;
+    const floor = Math.floor(exact);
+    out[i] = floor;
+    fractions[i] = exact - floor;
+    distributed += floor;
+  }
+
+  let remainder = totalCents - distributed;
+  if (remainder <= 0) return out;
+
+  const order = Array.from(weights, (_, i) => i).sort(
     // Ties break on index so the split is deterministic across runs and machines.
-    .sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+    (a, b) => (fractions[b] ?? 0) - (fractions[a] ?? 0) || a - b,
+  );
 
-  const out = [...floors];
-  for (const { index } of order) {
+  for (const index of order) {
     if (remainder <= 0) break;
     out[index] = (out[index] ?? 0) + 1;
     remainder -= 1;

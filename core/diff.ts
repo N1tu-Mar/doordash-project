@@ -69,8 +69,12 @@ export function normalizeItemName(name: string): string {
     .trim();
 }
 
+function tokensOfNormalized(normalized: string): Set<string> {
+  return new Set(normalized.split(" ").filter(Boolean));
+}
+
 function tokens(name: string): Set<string> {
-  return new Set(normalizeItemName(name).split(" ").filter(Boolean));
+  return tokensOfNormalized(normalizeItemName(name));
 }
 
 /**
@@ -87,14 +91,48 @@ export function headNoun(name: string): string {
   return normalizeItemName(normalized);
 }
 
+/** Jaccard overlap of two token sets that have already been built. */
+function jaccardSets(ta: ReadonlySet<string>, tb: ReadonlySet<string>): number {
+  if (ta.size === 0 || tb.size === 0) return 0;
+  // Probe from the smaller set: the work is min(|a|,|b|) lookups, not |a|.
+  const [small, large] = ta.size <= tb.size ? [ta, tb] : [tb, ta];
+  let intersection = 0;
+  for (const t of small) if (large.has(t)) intersection += 1;
+  return intersection / (ta.size + tb.size - intersection);
+}
+
 /** Jaccard overlap of token sets. 1 = identical token bags, 0 = disjoint. */
 export function jaccard(a: string, b: string): number {
-  const ta = tokens(a);
-  const tb = tokens(b);
-  if (ta.size === 0 || tb.size === 0) return 0;
-  let intersection = 0;
-  for (const t of ta) if (tb.has(t)) intersection += 1;
-  return intersection / (ta.size + tb.size - intersection);
+  return jaccardSets(tokens(a), tokens(b));
+}
+
+/**
+ * Everything a name contributes to a comparison, computed once.
+ *
+ * diffOrder scores every (line, detection-group) pair, so a similarity function
+ * that re-derives its inputs from strings does that derivation n*m times. Each
+ * nameSimilarity call ran four NFKD normalizations and allocated four Sets; a
+ * 40-line grocery order against 30 detection groups is 4,800 normalizations and
+ * 4,800 throwaway Sets to produce 1,200 numbers. Profiling each name once turns
+ * that into 140.
+ */
+interface NameProfile {
+  normalized: string;
+  tokens: Set<string>;
+  headTokens: Set<string>;
+}
+
+function profileName(name: string): NameProfile {
+  const normalized = normalizeItemName(name);
+  return {
+    normalized,
+    tokens: tokensOfNormalized(normalized),
+    headTokens: tokensOfNormalized(headNoun(name)),
+  };
+}
+
+function profileSimilarity(a: NameProfile, b: NameProfile): number {
+  return Math.max(jaccardSets(a.tokens, b.tokens), jaccardSets(a.headTokens, b.headTokens));
 }
 
 /**
@@ -103,7 +141,7 @@ export function jaccard(a: string, b: string): number {
  * up as logic, and a wrong guess here becomes a wrong dollar amount.
  */
 export function nameSimilarity(a: string, b: string): number {
-  return Math.max(jaccard(a, b), jaccard(headNoun(a), headNoun(b)));
+  return profileSimilarity(profileName(a), profileName(b));
 }
 
 /**
@@ -146,20 +184,32 @@ function groupDetections(detections: readonly DetectedItem[]): DetectionGroup[] 
   return [...groups.values()];
 }
 
+/** Lowest confidence in a list, without a spread. */
+function lowestConfidenceOf(matched: readonly DetectedItem[]): number | null {
+  if (matched.length === 0) return null;
+  let lowest = Number.POSITIVE_INFINITY;
+  for (const d of matched) if (d.confidence < lowest) lowest = d.confidence;
+  return lowest;
+}
+
 export function diffOrder(
   receiptItems: readonly OrderItem[],
   detections: readonly DetectedItem[],
 ): DiffResult {
   const groups = groupDetections(detections);
 
+  // One profile per distinct name, reused across the whole n*m scoring pass.
+  const itemProfiles = receiptItems.map((item) => profileName(item.name));
+  const groupProfiles = groups.map((group) => profileName(group.name));
+
   // Score every pair, then solve globally. Identity matching only — quantity is
   // reconciled afterwards, because a receipt line of 2 against a detection of 1
   // is a partial shortage, not a failed match (RESPONSES.md R3).
-  const cost = receiptItems.map((item) =>
-    groups.map((group) => {
-      const score = nameSimilarity(group.name, item.name);
-      return score >= FUZZY_MATCH_THRESHOLD ? 1 - score : UNACCEPTABLE_COST;
-    }),
+  const score = itemProfiles.map((itemProfile) =>
+    groupProfiles.map((groupProfile) => profileSimilarity(groupProfile, itemProfile)),
+  );
+  const cost = score.map((row) =>
+    row.map((s) => (s >= FUZZY_MATCH_THRESHOLD ? 1 - s : UNACCEPTABLE_COST)),
   );
 
   const assignment = minCostAssignment(cost);
@@ -168,19 +218,20 @@ export function diffOrder(
   const lines: DiffLine[] = receiptItems.map((receiptItem, lineIndex) => {
     const groupIndex = assignment[lineIndex] ?? -1;
     const group = groupIndex >= 0 ? groups[groupIndex] : undefined;
-    const score =
-      group === undefined ? 0 : nameSimilarity(group.name, receiptItem.name);
+    // Read the score back out of the matrix rather than recomputing it: the
+    // pairing was already scored to build the cost matrix.
+    const pairScore = group === undefined ? 0 : (score[lineIndex]?.[groupIndex] ?? 0);
 
     // An assignment can still hand back a pairing below the floor when there is
     // nothing better available. Reject it here: the floor is absolute.
-    const accepted = group !== undefined && score >= FUZZY_MATCH_THRESHOLD;
+    const accepted = group !== undefined && pairScore >= FUZZY_MATCH_THRESHOLD;
     if (accepted && groupIndex >= 0) claimed.add(groupIndex);
 
     const matched = accepted && group ? group.members : [];
     const detectedQuantity = accepted && group ? group.quantity : 0;
     const exact =
-      accepted && group
-        ? normalizeItemName(group.name) === normalizeItemName(receiptItem.name)
+      accepted && groupIndex >= 0
+        ? groupProfiles[groupIndex]?.normalized === itemProfiles[lineIndex]?.normalized
         : false;
 
     return {
@@ -190,9 +241,12 @@ export function diffOrder(
       proposedMissingQuantity: Math.max(0, receiptItem.quantity - detectedQuantity),
       matchedDetections: matched,
       matchQuality: accepted ? (exact ? "exact" : "fuzzy") : "none",
-      matchScore: accepted ? score : null,
-      lowestConfidence:
-        matched.length === 0 ? null : Math.min(...matched.map((d) => d.confidence)),
+      matchScore: accepted ? pairScore : null,
+      // A loop, not Math.min(...matched.map(...)): the spread allocates an
+      // intermediate array AND pushes one argument per element onto the call
+      // stack, which is a RangeError rather than a slow path once the array is
+      // large enough.
+      lowestConfidence: lowestConfidenceOf(matched),
     };
   });
 
