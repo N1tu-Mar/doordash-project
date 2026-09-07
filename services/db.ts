@@ -26,7 +26,12 @@ import { createHash } from "node:crypto";
 import { config } from "./config.js";
 import { safeMessage } from "./secrets.js";
 import { ShortedDataError, type DetectedItem, type IngestSource, type OrderItem } from "../core/types.js";
-import { receiptBalanceDeltaCents, type ReceiptTotals } from "../core/money.js";
+import {
+  receiptBalanceDeltaCents,
+  totalFeesCents,
+  type OwedBreakdown,
+  type ReceiptMoney,
+} from "../core/money.js";
 import { LIMITS, assertPlausibleReceiptAmount, boundedUntrustedName } from "../core/untrusted.js";
 
 /* --------------------------------------------------------------- context */
@@ -53,7 +58,13 @@ export type ServiceReason =
   /** Background Gmail ingestion runs with no user session attached to the request. */
   | "gmail_ingest_worker"
   /** Creating and verifying storage buckets during setup. */
-  | "storage_provisioning";
+  | "storage_provisioning"
+  /**
+   * Granting and revoking roles. `user_roles` is unwritable from any user
+   * session by design (migration 0004), so this is the ONLY path that can
+   * change privilege — including the bootstrap of the first admin.
+   */
+  | "role_administration";
 
 export interface ServiceContext {
   kind: "service";
@@ -214,7 +225,13 @@ export interface InsertOrderInput {
   orderedAt: string;
   merchantName: string;
   merchantAddr: string | null;
-  totals: ReceiptTotals;
+  /**
+   * The money side of the receipt, fee lines and all. `orders.fees_cents` is a
+   * scalar, so the taxonomy is collapsed with totalFeesCents() for that column
+   * while the individual lines go to `order_fee_lines` — core/money.ts branches
+   * on the kind, so the kind has to survive the write.
+   */
+  receipt: ReceiptMoney;
   items: OrderItem[];
   /** Storage key of the raw artifact. Must already be uploaded — see §3.2. */
   rawArtifactPath: string;
@@ -222,8 +239,8 @@ export interface InsertOrderInput {
 }
 
 /**
- * Inserts an order and its items ATOMICALLY, via the `insert_order_with_items`
- * function in migration 0003.
+ * Inserts an order and its items ATOMICALLY, via the `insert_order_full`
+ * function in migration 0005.
  *
  * The previous two-statement version could leave an order row with zero items
  * when the second insert failed. That is not a cosmetic inconsistency: core/
@@ -250,26 +267,34 @@ export async function insertOrder(ctx: UserContext, input: InsertOrderInput): Pr
 
   // Bounds on every value that came from a model reading untrusted pixels,
   // applied at the last moment before it becomes a durable row.
-  assertPlausibleReceiptAmount("subtotalCents", input.totals.subtotalCents);
-  assertPlausibleReceiptAmount("feesCents", input.totals.feesCents);
-  assertPlausibleReceiptAmount("taxCents", input.totals.taxCents);
-  assertPlausibleReceiptAmount("tipCents", input.totals.tipCents);
-  assertPlausibleReceiptAmount("totalCents", input.totals.totalCents);
+  if (input.receipt.feeLines.length > 40) {
+    throw new ShortedDataError(
+      `receipt has ${input.receipt.feeLines.length} fee lines, over the 40 limit`,
+      "DB_TOO_MANY_FEE_LINES",
+    );
+  }
 
-  const { data, error } = await userDb(ctx).rpc("insert_order_with_items", {
+  assertPlausibleReceiptAmount("subtotalCents", input.receipt.subtotalCents);
+  assertPlausibleReceiptAmount("feesCents", totalFeesCents(input.receipt.feeLines));
+  assertPlausibleReceiptAmount("taxCents", input.receipt.taxCents);
+  assertPlausibleReceiptAmount("tipCents", input.receipt.tipCents);
+  assertPlausibleReceiptAmount("totalCents", input.receipt.totalCents);
+
+  const { data, error } = await userDb(ctx).rpc("insert_order_full", {
     p_source: input.source,
     p_ordered_at: input.orderedAt,
     p_merchant_name: boundedUntrustedName("merchantName", input.merchantName),
     p_merchant_addr:
       input.merchantAddr === null ? null : boundedUntrustedName("merchantAddr", input.merchantAddr),
-    p_subtotal_cents: input.totals.subtotalCents,
-    p_fees_cents: input.totals.feesCents,
-    p_tax_cents: input.totals.taxCents,
-    p_tip_cents: input.totals.tipCents,
-    p_total_cents: input.totals.totalCents,
+    p_subtotal_cents: input.receipt.subtotalCents,
+    // p_fees_cents is deliberately absent: insert_order_full derives it by
+    // summing the fee lines, so the scalar and the lines cannot disagree.
+    p_tax_cents: input.receipt.taxCents,
+    p_tip_cents: input.receipt.tipCents,
+    p_total_cents: input.receipt.totalCents,
     p_raw_artifact_path: input.rawArtifactPath,
     p_parser_version: input.parserVersion,
-    p_balance_delta_cents: receiptBalanceDeltaCents(input.totals),
+    p_balance_delta_cents: receiptBalanceDeltaCents(input.receipt),
     p_items: input.items.map((item, lineIndex) => ({
       name: boundedUntrustedName(`items[${lineIndex}].name`, item.name),
       quantity: item.quantity,
@@ -282,11 +307,20 @@ export async function insertOrder(ctx: UserContext, input: InsertOrderInput): Pr
       ),
       line_index: lineIndex,
     })),
+    p_fee_lines: input.receipt.feeLines.map((fee, lineIndex) => ({
+      label: boundedUntrustedName(`feeLines[${lineIndex}].label`, fee.label),
+      cents: assertPlausibleReceiptAmount(`feeLines[${lineIndex}].cents`, fee.cents),
+      // The classification, not just the amount. core/money.ts decides per-kind
+      // whether a line pro-rates; an order stored without kinds cannot have its
+      // claim recomputed.
+      kind: fee.kind,
+      line_index: lineIndex,
+    })),
   });
 
   if (error) throw safeMessage("insertOrder failed", error.message);
   if (typeof data !== "string") {
-    throw new ShortedDataError("insert_order_with_items returned no id", "DB_NO_ORDER_ID");
+    throw new ShortedDataError("insert_order_full returned no id", "DB_NO_ORDER_ID");
   }
   return data;
 }
@@ -344,8 +378,14 @@ export interface InsertDiscrepancyInput {
   detectedItems: DetectedItem[];
   /** What the human said after looking at the food. Ground truth. */
   confirmedItems: unknown[];
-  owedCents: number;
-  owedTipShareCents: number;
+  /**
+   * The whole breakdown from core/money.ts, not a single figure.
+   *
+   * Storing only a total made a past claim irreproducible: "$14.20" does not say
+   * whether the delivery fee was included, and the eval set then compares the
+   * model against a number nobody sent.
+   */
+  owed: OwedBreakdown;
   photoPaths: string[];
 }
 
@@ -368,8 +408,9 @@ export async function insertDiscrepancy(
   if (input.photoPaths.length === 0) {
     throw new ShortedDataError("a discrepancy needs at least one photo", "DB_NO_PHOTOS");
   }
-  assertPlausibleReceiptAmount("owedCents", input.owedCents);
-  assertPlausibleReceiptAmount("owedTipShareCents", input.owedTipShareCents);
+  assertPlausibleReceiptAmount("owed.headlineCents", input.owed.headlineCents);
+  assertPlausibleReceiptAmount("owed.withTipCents", input.owed.withTipCents);
+  assertPlausibleReceiptAmount("owed.maximumCents", input.owed.maximumCents);
 
   const { data, error } = await userDb(ctx)
     .from("discrepancies")
@@ -378,8 +419,11 @@ export async function insertDiscrepancy(
       kind: input.kind,
       detected_items: input.detectedItems,
       confirmed_items: input.confirmedItems,
-      owed_cents: input.owedCents,
-      owed_tip_share_cents: input.owedTipShareCents,
+      owed_cents: input.owed.headlineCents,
+      owed_tip_share_cents: input.owed.withTipCents - input.owed.headlineCents,
+      owed_with_tip_cents: input.owed.withTipCents,
+      owed_maximum_cents: input.owed.maximumCents,
+      owed_components: input.owed.components,
       photo_paths: input.photoPaths,
     })
     .select("id")

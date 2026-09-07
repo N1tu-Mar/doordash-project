@@ -16,6 +16,10 @@ research/corpus/
 .DS_Store
 coverage/
 
+# Agent worktrees. Live git worktrees with their own node_modules — never a
+# thing to commit into the repo they are a worktree of.
+.claude/worktrees/
+
 # Exported Claude Code session transcripts. Local working notes — they carry
 # full conversation context and are not part of the codebase.
 session*.md
