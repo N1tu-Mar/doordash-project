@@ -5,7 +5,8 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { config } from "./config.js";
 import type { DetectedItem, IngestSource, OrderItem } from "../core/types.js";
-import { receiptBalanceDeltaCents, totalFeesCents, type ReceiptMoney } from "../core/money.js";
+import type { ReceiptMoney } from "../core/money.js";
+import { feeLineRows, orderMoneyColumns } from "./order-row.js";
 
 let client: SupabaseClient | null = null;
 
@@ -46,16 +47,9 @@ export async function insertOrder(input: InsertOrderInput): Promise<string> {
       ordered_at: input.orderedAt,
       merchant_name: input.merchantName,
       merchant_addr: input.merchantAddr,
-      subtotal_cents: input.totals.subtotalCents,
-      fees_cents: totalFeesCents(input.totals.feeLines),
-      // Per-line, with the kind that drives the refund math. Migration 0004.
-      fee_lines: input.totals.feeLines,
-      tax_cents: input.totals.taxCents,
-      tip_cents: input.totals.tipCents,
-      total_cents: input.totals.totalCents,
+      ...orderMoneyColumns(input.totals),
       raw_artifact_path: input.rawArtifactPath,
       parser_version: input.parserVersion,
-      balance_delta_cents: receiptBalanceDeltaCents(input.totals),
     })
     .select("id")
     .single();
@@ -78,6 +72,19 @@ export async function insertOrder(input: InsertOrderInput): Promise<string> {
     // artifact that exists in storage. A half-written order is visible and
     // fixable; a deleted one loses the pointer to the artifact.
     throw new Error(`insertOrder items failed for ${orderId}: ${itemsError.message}`);
+  }
+
+  // Fee lines, one row each, with the label and kind core/money.ts allocates
+  // against. Written after the items for the same reason the items are written
+  // after the order: a partial write stays visible and fixable, and the order
+  // row still points at a raw artifact that exists.
+  if (input.totals.feeLines.length > 0) {
+    const { error: feesError } = await db()
+      .from("order_fee_lines")
+      .insert(feeLineRows(orderId, input.totals));
+    if (feesError) {
+      throw new Error(`insertOrder fee lines failed for ${orderId}: ${feesError.message}`);
+    }
   }
 
   return orderId;
