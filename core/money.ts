@@ -304,7 +304,7 @@ export function computeOwed(
       label: fee.label,
       kind: fee.kind,
       cents,
-      includedInHeadline: policy.defaultIncluded && cents > 0,
+      includedInHeadline: policy.defaultIncluded,
     };
     if (!component.includedInHeadline) {
       component.excludedReason = exclusionReasonFor(fee.kind);
@@ -383,7 +383,8 @@ function exclusionReasonFor(kind: FeeKind): ExclusionReason {
     case "unknown":
       return "unrecognised_fee_label";
     case "proportional":
-      // Only reachable when a proportional share rounds to zero cents.
+      // Unreachable: proportional lines are included by default, so no reason
+      // is ever requested for one. Present because the switch is exhaustive.
       return "fee_scope_unknown";
   }
 }
