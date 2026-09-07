@@ -42,9 +42,14 @@ jobs:
     # which matters because CI runs on pull requests from forks.
     environment: ${{ inputs.environment }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: supabase/setup-cli@v1
+      # v3, not v1: the only floating major tag that exists in that repo is v3.
+      # `@v1` does not resolve, so this step would have failed the first time
+      # anyone dispatched this workflow — which nobody has, because it is
+      # environment-gated and manual. Since v2.0.0 the action is `composite`
+      # rather than a Node action, so the Node 20 deprecation does not touch it.
+      - uses: supabase/setup-cli@v3
         with:
           version: latest
 
