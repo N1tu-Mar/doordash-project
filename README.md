@@ -64,8 +64,8 @@ a real receipt: `docs/DEPLOYMENT.md`.
 
 | Job | Blocking | Proves |
 |---|---|---|
-| `checks` | yes | typecheck, unit and property tests |
-| `schema` | yes | migrations apply to real Postgres; RLS, triggers and the n>=20 gates survive |
+| `checks` | yes | typecheck, unit and property tests, and the migrations applied in-process |
+| `schema` | yes | migrations apply to stock Postgres 16; RLS, triggers and the n>=20 gates survive |
 | `corpus` | no | reports that the money math is unverified against real receipts |
 | `no-corpus-committed` | yes | no real receipt has ever been committed |
 

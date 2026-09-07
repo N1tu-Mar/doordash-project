@@ -89,8 +89,13 @@ this branch's committed core work and expects it.
 2. `pnpm test:corpus` — still red, still correct. It reports that the money math
    is unverified against real receipts, and it turns green by importing a real
    order, not by editing the test.
-3. Push and watch the `schema` CI job. It is the first time any of this SQL has
-   executed: there is no Docker or Postgres on the development machine, so
-   migrations `0001`–`0006` and the schema assertions have only ever been read,
-   never run. Expect the first run to find something.
-4. Delete this file.
+3. `pnpm test` now applies every migration to an in-process Postgres and runs the
+   schema assertions against it, so a merge that breaks the SQL fails locally
+   rather than after a push. Watch the `schema` CI job anyway — it runs the same
+   files against stock Postgres 16, which is authoritative over the WASM build.
+4. Add main's new tables to the RLS and policy lists in
+   `supabase/ci/01_assert_schema.sql`. The `tests/schema.test.ts` RLS checks are
+   already exhaustive over every public table, so a merged table with RLS off or
+   no policy will fail the suite immediately — that is the intended signal, not a
+   problem with the test.
+5. Delete this file.

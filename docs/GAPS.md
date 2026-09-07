@@ -65,21 +65,28 @@ that is worth the attention it costs is measurable. **Closes with R7.**
 ## Blocked on infrastructure access (needs credentials or a machine)
 
 ### 5. The migrations have never been executed against a real project
-PARTIALLY CLOSED. CI now applies every migration to a real Postgres 16 container on
-every push (`.github/workflows/ci.yml`, job `schema`) against a minimal auth shim, then
-asserts the schema still encodes the rules — RLS on every table, a policy on every
-table, the immutability triggers, the n >= 20 gates, no `seed` source, no float money
-column. So the syntax, the trigger bodies, the policy expressions and the views are
-now verified on every commit.
+MOSTLY CLOSED. The SQL now runs in three places, in increasing order of authority:
 
-What CI cannot prove: that `auth.uid()` resolves correctly under a real Supabase JWT,
-and that a real row round-trips under RLS with the anon key. CI inserts no rows at all
-— §2 bans invented users as firmly as invented receipts, so the assertions are catalog
-introspection only.
+1. `pnpm test` — `tests/schema.test.ts` applies every migration to Postgres compiled
+   to WebAssembly (PGlite), in-process, in about five seconds. No Docker, no daemon,
+   runs on any machine. Then it runs `supabase/ci/01_assert_schema.sql`, and then it
+   breaks one invariant at a time to prove those assertions actually fail when they
+   should.
+2. CI — the same files against a stock Postgres 16 container. Authoritative over the
+   WASM build, which tracks a different major.
+3. The deploy workflow — the same assertions against the real database, after pushing.
 
-**Still open:** build order §8 step 1, "verify a real row can be written and read",
-against a linked project with a real signed-in user. See `docs/DEPLOYMENT.md` §2.3 —
-and do it with the anon key, not the service role, or it proves nothing about RLS.
+First execution passed: all six migrations apply, every trigger installs, RLS is on
+with a policy on every table, both n >= 20 gates compile into their views.
+
+**Still open:** that `auth.uid()` resolves correctly under a real Supabase JWT, and
+that a real row round-trips under RLS. Neither is provable without a live project —
+the CI shim resolves `auth.uid()` to NULL, and no row is inserted anywhere, because
+§2 bans invented users as firmly as invented receipts.
+
+Build order §8 step 1 — "verify a real row can be written and read" — is therefore
+still not done. See `docs/DEPLOYMENT.md` §2.3, and do it with the anon key rather
+than the service role, or it proves nothing about the policies.
 
 ### 6. Storage buckets not created
 `raw-receipts` and `delivered-photos` (`services/config.ts` → `BUCKETS`) must exist

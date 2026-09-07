@@ -15,7 +15,7 @@ project does not do.
 | Layer | State |
 |---|---|
 | `core/` — money, diff, matcher, dedupe, claim draft | Built, tested, pure |
-| `supabase/migrations/` | Written; CI applies them to Postgres on every push |
+| `supabase/migrations/` | Applied to a real Postgres by `pnpm test` and again in CI |
 | `ingest/gmail.ts` — raw HTML ingestion | Built. The **parser** is not (GAPS #2) |
 | `services/vision.ts` | Typechecked, never run against the live API (GAPS #7) |
 | `app/` — the three screens | Not started, on purpose (GAPS #9, build order §8) |
@@ -44,9 +44,14 @@ variable rather than starting half-configured.
 
 ```bash
 pnpm typecheck
-pnpm test          # green suite
+pnpm test          # green suite, including the migrations applied to a real Postgres
 pnpm test:corpus   # RED until a real receipt is hand-verified. Expected.
 ```
+
+`pnpm test` boots Postgres compiled to WebAssembly, applies every migration, runs
+the schema assertions, and then breaks each invariant in turn to check the
+assertions actually catch it. No Docker, no server, about five seconds. So a
+migration that does not apply fails before you push, not after.
 
 ---
 
@@ -63,6 +68,10 @@ Or, from CI: **Actions → Deploy migrations → Run workflow**, pick the
 environment, leave `dry_run` on for the first run to see the diff, then run
 again with it off. That path is preferred — it re-runs the schema assertions
 against the real database afterwards and fails if a rule was dropped.
+
+The SQL has already been executed against a real Postgres by this point, twice:
+in `pnpm test` and in the `schema` CI job. What `db push` adds is the first run
+against a database where `auth.uid()` resolves to an actual user.
 
 ### 2.2 Storage buckets
 
@@ -174,8 +183,8 @@ amount changed. If it did, the deterministic text ships instead.
 
 | Job | Blocking | What it proves |
 |---|---|---|
-| `checks` | yes | typecheck, unit and property tests |
-| `schema` | yes | migrations apply to real Postgres; RLS, triggers and the n≥20 gates survive |
+| `checks` | yes | typecheck, unit and property tests, and the migrations applied in-process |
+| `schema` | yes | the same migrations against stock Postgres 16 — authoritative over the WASM build |
 | `corpus` | **no** | reports that the money math is unverified against real receipts |
 | `no-corpus-committed` | yes | no real receipt has ever entered git history |
 
